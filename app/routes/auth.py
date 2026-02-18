@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 from app.core.database import users_collection
 from typing import Optional
+from datetime import datetime
 
 router = APIRouter()
 
@@ -19,6 +20,59 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
 
+
+class GoogleUser(BaseModel):
+    name: str
+    email: EmailStr
+    uid: str
+
+
+
+
+# ==============================
+# 🚀 Google Signup / Login
+# ==============================
+
+@router.post("/google-auth")
+async def google_auth(user: GoogleUser):
+    try:
+        # 🔍 Check if user already exists
+        existing_user = users_collection.find_one({"uid": user.uid})
+
+        if existing_user:
+            return {
+                "success": True,
+                "message": "User login successful",
+                "user": {
+                    "name": existing_user["name"],
+                    "email": existing_user["email"],
+                    "uid": existing_user["uid"]
+                }
+            }
+
+        # 📝 If not exists → create new user
+        result = users_collection.insert_one({
+            "name": user.name,
+            "email": user.email,
+            "uid": user.uid,
+            "provider": "google",
+            "created_at": datetime.utcnow()
+        })
+
+        return {
+            "success": True,
+            "message": "User created successfully",
+            "user": {
+                "id": str(result.inserted_id),
+                "name": user.name,
+                "email": user.email,
+                "uid": user.uid
+            }
+        }
+
+    except Exception as e:
+        print("GOOGLE AUTH ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 # ==============================
 # 🚀 Signup Route
