@@ -3,14 +3,17 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
 MONGO_URI = os.getenv("MONGO_URI")
+
+if not MONGO_URI:
+    raise Exception("❌ MONGO_URI not found in .env")
+
 client = MongoClient(MONGO_URI)
 
-# DB
 db = client["adaptive_ai"]
 
-# collections
 users_collection = db["users"]
-files_collection = db["files"]
+datasets_collection = db["datasets"]
 
-print("Connected to MongoDB Atlas successfully!")
+print("✅ Connected to MongoDB Atlas")

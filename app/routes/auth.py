@@ -1,153 +1,58 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Header, HTTPException
 from app.core.database import users_collection
-from typing import Optional
+from app.core.firebase import verify_firebase_token
 from datetime import datetime
 
 router = APIRouter()
 
 
-# ==============================
-# 📦 Models
-# ==============================
+@router.post("/getUserDetails")
+async def get_user_details(
+    user: dict,
+    Authorization: str = Header(...)
+):
+    token = Authorization.replace("Bearer ", "")
+    decoded = verify_firebase_token(token)
 
-class UserCreate(BaseModel):
-    name: str
-    email: EmailStr
-    uid: str
+    if not decoded:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
 
+    uid = decoded.get("uid")
+    email = decoded.get("email")
 
-class UserLogin(BaseModel):
-    email: EmailStr
+    existing_user = users_collection.find_one({"uid": uid})
 
-
-class GoogleUser(BaseModel):
-    name: str
-    email: EmailStr
-    uid: str
-
-
-
-
-# ==============================
-# 🚀 Google Signup / Login
-# ==============================
-
-@router.post("/google-auth")
-async def google_auth(user: GoogleUser):
-    try:
-        # 🔍 Check if user already exists
-        existing_user = users_collection.find_one({"uid": user.uid})
-
-        if existing_user:
-            return {
-                "success": True,
-                "message": "User login successful",
-                "user": {
-                    "name": existing_user["name"],
-                    "email": existing_user["email"],
-                    "uid": existing_user["uid"]
-                }
-            }
-
-        # 📝 If not exists → create new user
-        result = users_collection.insert_one({
-            "name": user.name,
-            "email": user.email,
-            "uid": user.uid,
-            "provider": "google",
-            "created_at": datetime.utcnow()
-        })
-
+    if existing_user:
         return {
             "success": True,
-            "message": "User created successfully",
-            "user": {
-                "id": str(result.inserted_id),
-                "name": user.name,
-                "email": user.email,
-                "uid": user.uid
-            }
-        }
-
-    except Exception as e:
-        print("GOOGLE AUTH ERROR:", e)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-# ==============================
-# 🚀 Signup Route
-# ==============================
-
-@router.post("/signup")
-async def signup(user: UserCreate):
-    try:
-        # 🔍 Check if user already exists (by email OR uid)
-        existing_user = users_collection.find_one({
-            "$or": [
-                {"email": user.email},
-                {"uid": user.uid}
-            ]
-        })
-
-        if existing_user:
-            raise HTTPException(
-                status_code=400,
-                detail="User already exists"
-            )
-
-        # 📝 Insert new user
-        result = users_collection.insert_one({
-            "name": user.name,
-            "email": user.email,
-            "uid": user.uid
-        })
-
-        return {
-            "success": True,
-            "message": "User created successfully",
-            "user": {
-                "id": str(result.inserted_id),
-                "name": user.name,
-                "email": user.email,
-                "uid": user.uid
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("SIGNUP ERROR:", e)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
-# ==============================
-# 🔐 Signin Route
-# ==============================
-
-@router.post("/signin")
-async def signin(user: UserLogin):
-    try:
-        # 🔍 Check if user exists in MongoDB
-        existing_user = users_collection.find_one({"email": user.email})
-
-        if not existing_user:
-            raise HTTPException(
-                status_code=404,
-                detail="User not found in database"
-            )
-
-        return {
-            "success": True,
-            "message": "User login successful",
-            "user": {
-                "name": existing_user["name"],
+            "message": "",
+            "data": {
+                "uid": existing_user["uid"],
                 "email": existing_user["email"],
-                "uid": existing_user["uid"]
+                "displayName": existing_user.get("displayName"),
+                "photoURL": existing_user.get("photoURL")
             }
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("SIGNIN ERROR:", e)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    # Create new user (Google auth handled by Firebase)
+    new_user = {
+        "uid": uid,
+        "email": email,
+        "displayName": user.get("displayName"),
+        "photoURL": user.get("photoUrl"),
+        "provider": "google",
+        "createdAt": datetime.utcnow()
+    }
+
+    users_collection.insert_one(new_user)
+
+    return {
+        "success": True,
+        "message": "",
+        "data": {
+            "uid": uid,
+            "email": email,
+            "displayName": new_user.get("displayName"),
+            "photoURL": new_user.get("photoURL")
+        }
+    }
