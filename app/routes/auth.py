@@ -6,7 +6,7 @@ from datetime import datetime
 router = APIRouter()
 
 
-@router.post("/getUserDetails")
+@router.post("/get-user-details")
 async def get_user_details(
     user: dict,
     Authorization: str = Header(...)
@@ -34,7 +34,7 @@ async def get_user_details(
             }
         }
 
-    # Create new user (Google auth handled by Firebase)
+    # Create new user — Firebase handles auth, MongoDB stores profile
     new_user = {
         "uid": uid,
         "email": email,

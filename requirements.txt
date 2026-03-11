@@ -3,7 +3,9 @@ uvicorn
 pymongo
 firebase-admin
 python-dotenv
-python-multipart 
-pandas 
+python-multipart
+pandas
 openpyxl
+numpy
 email-validator
+httpx

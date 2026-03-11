@@ -9,11 +9,14 @@ from app.core.database import datasets_collection
 from app.core.firebase import verify_firebase_token
 from app.routes.auth import router as auth_router
 from app.routes.transform import router as transform_router
+from app.routes.dashboard import router as dashboard_router
+from app.services.dataset_service import build_dataset_response
 
 app = FastAPI()
 
 app.include_router(auth_router)
 app.include_router(transform_router)
+app.include_router(dashboard_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,6 +88,7 @@ async def upload_file(
             "uid": uid,
             "fileName": file.filename,
             "type": file_type,
+            "fileSize": file.size or 0,
             "data": df.to_dict(orient="records"),
             "createdAt": datetime.utcnow()
         }
@@ -100,7 +104,7 @@ async def upload_file(
                     "type": file_type,
                     "fileName": file.filename,
                     "fileMeta": {
-                        "size": file.size,
+                        "size": file.size or 0,
                         "uploadedAt": datetime.utcnow().isoformat()
                     }
                 },
@@ -122,12 +126,14 @@ async def upload_file(
             }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # =========================================
-# Get Dataset
+# Get Dataset — returns full dataset shape (same as /upload-file)
 # =========================================
 @app.post("/get-dataset")
 async def get_dataset(
@@ -146,16 +152,14 @@ async def get_dataset(
     if not dataset:
         return {
             "success": False,
-            "message": "Could get dataset. Please try again.",
+            "message": "Could not get dataset. Please try again.",
             "data": None
         }
 
     return {
         "success": True,
         "message": "",
-        "data": {
-            "datasetId": str(dataset["_id"])
-        }
+        "data": build_dataset_response(dataset)
     }
 
 
@@ -174,13 +178,22 @@ async def remove_dataset(
 
     uid = decoded["uid"]
 
+    dataset = datasets_collection.find_one({"uid": uid})
+
+    if not dataset:
+        return {
+            "success": False,
+            "message": "File could not be deleted.",
+            "data": str(dataset["_id"]) if dataset else None
+        }
+
     result = datasets_collection.delete_one({"uid": uid})
 
     if result.deleted_count == 0:
         return {
             "success": False,
             "message": "File could not be deleted.",
-            "data": None
+            "data": str(dataset["_id"])
         }
 
     return {
