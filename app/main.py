@@ -81,6 +81,31 @@ async def upload_file(
         cols = len(df.columns)
         null_count = int(df.isnull().sum().sum())
 
+        # Year stats — detect datetime or numeric "year" columns
+        year_stats = {}
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            if "datetime" in dtype:
+                year_series = df[col].dropna().dt.year
+                if not year_series.empty:
+                    year_stats[col] = {
+                        "min": int(year_series.min()),
+                        "max": int(year_series.max()),
+                        "count": int(year_series.count()),
+                    }
+            elif "int" in dtype or "float" in dtype:
+                if "year" in col.lower():
+                    year_series = df[col].dropna()
+                    if not year_series.empty:
+                        year_stats[col] = {
+                            "min": int(year_series.min()),
+                            "max": int(year_series.max()),
+                            "count": int(year_series.count()),
+                        }
+
+        error_count = null_count
+        quality_score = max(0, round(100 - (null_count / max(rows * cols, 1)) * 100))
+
         preview_limit = 5
         head_rows = df.head(preview_limit).to_dict(orient="records")
 
@@ -115,8 +140,9 @@ async def upload_file(
                     "rows": rows,
                     "cols": cols,
                     "nullCount": null_count,
-                    "errorCount": 0,
-                    "dataQualityScore": 80
+                    "errorCount": error_count,
+                    "dataQualityScore": quality_score,
+                    "yearStats": year_stats
                 },
                 "head": {
                     "columns": list(df.columns),
@@ -166,7 +192,7 @@ async def get_dataset(
 # =========================================
 # Remove Dataset
 # =========================================
-@app.delete("/remove-dataset")
+@app.post("/remove-dataset")
 async def remove_dataset(
     Authorization: str = Header(...)
 ):

@@ -7,6 +7,8 @@ import numpy as np
 
 router = APIRouter(prefix="/transform")
 
+MAX_TEXT_SUGGESTIONS = 5
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -25,37 +27,67 @@ def _get_user_dataset(token: str) -> dict:
 
 
 def _save_df(dataset: dict, df: pd.DataFrame) -> dict:
+    """Persist updated dataframe to DB and return the refreshed document."""
     df = df.replace({np.nan: None})
     datasets_collection.update_one(
         {"_id": dataset["_id"]},
         {"$set": {"data": df.to_dict(orient="records")}}
     )
-    return datasets_collection.find_one({"_id": dataset["_id"]})
+    # Return updated dataset without an extra round-trip query
+    dataset["data"] = df.to_dict(orient="records")
+    return dataset
 
 
 def _is_date(val) -> bool:
+    """
+    Returns True only if the value looks like a real date string,
+    not a plain integer or float that pandas would coerce into a date.
+    """
+    s = str(val).strip()
+    # Reject bare numbers — pd.to_datetime("42") succeeds but it's not a date
+    if s.lstrip("-").isdigit():
+        return False
     try:
-        pd.to_datetime(str(val))
+        pd.to_datetime(s, infer_datetime_format=True)
         return True
     except Exception:
         return False
 
 
+def _compute_quality_score(df: pd.DataFrame) -> int:
+    """
+    Score out of 100 based on:
+      - Null ratio     → up to -60 penalty
+      - Duplicate ratio → up to -40 penalty
+    """
+    rows, cols = df.shape
+    total_cells = max(rows * cols, 1)
+
+    null_count = int(df.isnull().sum().sum())
+    dup_count = int(df.duplicated().sum())
+
+    null_ratio = null_count / total_cells
+    dup_ratio = dup_count / max(rows, 1)
+
+    score = 100 - (null_ratio * 60) - (dup_ratio * 40)
+    return max(0, round(score))
+
+
 def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
     """
-    Generates suggestions keeping _operation/_params for internal resolution.
+    Generates suggestions with internal _operation/_params fields.
     Strip these keys before returning to the client.
     """
     suggestions = []
     id_counter = 1
 
-    # Null values
+    # ── Null values ──────────────────────────────────────────────────────────
     null_count = int(df.isnull().sum().sum())
     if null_count > 0:
         suggestions.append({
             "id": id_counter,
             "title": "Remove missing values",
-            "description": f"{null_count} null values detected across the dataset",
+            "description": f"{null_count} null value{'s' if null_count > 1 else ''} detected across the dataset",
             "confidence": "high" if null_count > 50 else "medium",
             "rows_affected": null_count,
             "_operation": "REMOVE_NULLS",
@@ -63,13 +95,13 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
         })
         id_counter += 1
 
-    # Duplicate rows
+    # ── Duplicate rows ───────────────────────────────────────────────────────
     dup_count = int(df.duplicated().sum())
     if dup_count > 0:
         suggestions.append({
             "id": id_counter,
             "title": "Remove duplicate rows",
-            "description": f"{dup_count} duplicate rows detected",
+            "description": f"{dup_count} duplicate row{'s' if dup_count > 1 else ''} detected",
             "confidence": "high",
             "rows_affected": dup_count,
             "_operation": "REMOVE_DUPLICATES",
@@ -77,7 +109,7 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
         })
         id_counter += 1
 
-    # Columns that look like dates stored as strings
+    # ── String columns that look like dates ──────────────────────────────────
     for col in df.select_dtypes(include="object").columns:
         sample = df[col].dropna().head(20)
         if len(sample) == 0:
@@ -87,7 +119,7 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
             suggestions.append({
                 "id": id_counter,
                 "title": f'Convert "{col}" to Date type',
-                "description": f'Column "{col}" contains date-like values stored as string',
+                "description": f'Column "{col}" contains date-like values stored as strings',
                 "confidence": "medium",
                 "column": col,
                 "_operation": "CHANGE_TYPE",
@@ -99,18 +131,29 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
                 }
             })
             id_counter += 1
-            break  # one at a time
+            break  # surface one at a time to avoid overwhelming the user
 
-    # String columns with mixed casing / whitespace
+    # ── String columns with mixed casing / leading-trailing whitespace ────────
+    text_suggestion_count = 0
     for col in df.select_dtypes(include="object").columns:
+        if text_suggestion_count >= MAX_TEXT_SUGGESTIONS:
+            break
         sample = df[col].dropna().head(50).astype(str)
         has_ws = sample.str.startswith(" ").any() or sample.str.endswith(" ").any()
-        has_mixed = (sample.str.upper() != sample).any() and (sample.str.lower() != sample).any()
+        has_mixed = (
+            (sample.str.upper() != sample).any()
+            and (sample.str.lower() != sample).any()
+        )
         if has_ws or has_mixed:
+            issues = []
+            if has_ws:
+                issues.append("extra whitespace")
+            if has_mixed:
+                issues.append("mixed casing")
             suggestions.append({
                 "id": id_counter,
                 "title": f'Standardize text in "{col}"',
-                "description": "Detected mixed casing or extra whitespace",
+                "description": f'Detected {" and ".join(issues)} in column "{col}"',
                 "confidence": "medium",
                 "column": col,
                 "_operation": "TRANSFORM_TEXT",
@@ -121,17 +164,17 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
                 }
             })
             id_counter += 1
-            if id_counter > 8:
-                break
+            text_suggestion_count += 1
 
-    # Numeric column stats
+    # ── Numeric column statistics ─────────────────────────────────────────────
+    # Pick the column with the most variance (most interesting to summarise)
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if num_cols:
-        col = num_cols[0]
+        col = max(num_cols, key=lambda c: df[c].std(skipna=True) or 0)
         suggestions.append({
             "id": id_counter,
             "title": f'Show statistics for "{col}"',
-            "description": f"Generate mean, median, std, min, max for {col}",
+            "description": f'Generate mean, median, std, min, max for "{col}"',
             "confidence": "low",
             "column": col,
             "_operation": "STATISTICS",
@@ -140,6 +183,7 @@ def _generate_suggestions_with_ops(df: pd.DataFrame) -> list:
                 "metrics": ["mean", "median", "std", "min", "max"]
             }
         })
+        id_counter += 1  # kept consistent with rest of function
 
     return suggestions
 
@@ -190,7 +234,8 @@ async def apply_suggestion(
 ):
     """
     Apply a suggestion by its id.
-    Suggestions are re-derived from the current dataset so ids stay consistent.
+    Suggestions are re-derived from the live dataset so the operation
+    always reflects the current state, not a stale client-side snapshot.
     """
     token = Authorization.replace("Bearer ", "")
     dataset = _get_user_dataset(token)
@@ -206,7 +251,8 @@ async def apply_suggestion(
     if not matched:
         raise HTTPException(
             status_code=404,
-            detail=f"No suggestion found with id={suggestion_id}"
+            detail=f"No active suggestion found with id={suggestion_id}. "
+                   "The dataset may have changed — please refresh suggestions."
         )
 
     try:
