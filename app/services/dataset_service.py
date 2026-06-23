@@ -5,63 +5,104 @@ from datetime import datetime
 
 # ── Response builder ──────────────────────────────────────────────────────────
 
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+
 def build_dataset_response(dataset: dict) -> dict:
     df = pd.DataFrame(dataset["data"])
     df = df.replace({np.nan: None})
 
     columns = []
+
     for col in df.columns:
         dtype = str(df[col].dtype)
+
         if "int" in dtype or "float" in dtype:
             col_type = "number"
         elif "datetime" in dtype:
             col_type = "date"
+        elif "bool" in dtype:
+            col_type = "boolean"
         else:
             col_type = "string"
-        columns.append({"name": col, "type": col_type})
+
+        columns.append({
+            "name": col,
+            "type": col_type,
+            "nullable": bool(df[col].isnull().any()),
+            "uniqueCount": int(df[col].nunique(dropna=True))
+        })
 
     rows = len(df)
     cols = len(df.columns)
     null_count = int(df.isnull().sum().sum())
     dup_count = int(df.duplicated().sum())
 
-    preview_limit = 5
-    head_rows = df.head(preview_limit).to_dict(orient="records")
-
     created_at = dataset.get("createdAt", "")
-    uploaded_at = created_at.isoformat() if isinstance(created_at, datetime) else str(created_at)
+    uploaded_at = (
+        created_at.isoformat()
+        if isinstance(created_at, datetime)
+        else str(created_at)
+    )
 
     return {
-        "datasetId": str(dataset["_id"]),
-        "source": {
-            "type": dataset.get("type"),
-            "fileName": dataset.get("fileName"),
-            "fileMeta": {
-                "size": dataset.get("fileSize", 0),
-                "uploadedAt": uploaded_at
+        "etl": {
+            "extract": {
+                "datasetId": str(dataset["_id"]),
+                "source": {
+                    "type": dataset.get("type"),
+                    "fileName": dataset.get("fileName"),
+                    "fileMeta": {
+                        "size": dataset.get("fileSize", 0),
+                        "uploadedAt": uploaded_at
+                    }
+                }
+            },
+
+            "transform": {
+                "schema": {
+                    "columns": columns
+                },
+                "statistics": {
+                    "rows": rows,
+                    "columns": cols,
+                    "nullCount": null_count,
+                    "duplicateCount": dup_count,
+                    "dataQualityScore": _quality_score(
+                        null_count,
+                        dup_count,
+                        rows
+                    )
+                }
+            },
+
+            "load": {
+                "records": df.to_dict(orient="records")
             }
-        },
-        "schema": {"columns": columns},
-        "stats": {
-            "rows": rows,
-            "cols": cols,
-            "nullCount": null_count,
-            "errorCount": dup_count,
-            "dataQualityScore": _quality_score(null_count, dup_count, rows)
-        },
-        "head": {
-            "columns": list(df.columns),
-            "rows": head_rows,
-            "previewLimit": preview_limit
         }
     }
 
 
-def _quality_score(null_count: int, dup_count: int, total_rows: int) -> int:
+def _quality_score(
+    null_count: int,
+    dup_count: int,
+    total_rows: int
+) -> int:
     if total_rows == 0:
         return 100
+
     penalty = ((null_count + dup_count) / (total_rows + 1)) * 100
-    return max(0, min(100, int(100 - penalty)))
+
+    return max(
+        0,
+        min(
+            100,
+            int(100 - penalty)
+        )
+    )
+
 
 
 # ── Operations ────────────────────────────────────────────────────────────────
